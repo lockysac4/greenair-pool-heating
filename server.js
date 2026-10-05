@@ -1,14 +1,14 @@
-const express=require("express");
-const ModbusRTU=require("modbus-serial");
-const path=require("path");
-const app=express(), PORT=process.env.PORT||3000;
-const cfg={host:process.env.MODBUS_HOST||"192.168.1.69",port:Number(process.env.MODBUS_PORT||502),unitId:Number(process.env.MODBUS_UNIT_ID||1)};
-const REG={poolTemp:7487,ambientTemp:7497,pumpOutput:7119};
-const client=new ModbusRTU(); let connecting=null;
-async function conn(){if(client.isOpen)return;if(connecting)return connecting;connecting=client.connectTCP(cfg.host,{port:cfg.port}).then(()=>{client.setID(cfg.unitId);client.setTimeout(2000)});try{await connecting}finally{connecting=null}}
-async function read(r,n=1){await conn();try{return (await client.readHoldingRegisters(r-1,n)).data}catch(e){try{client.close(()=>{})}catch(_){};throw e}}
-function s32(a,b){return ((((a&65535)<<16)|(b&65535))|0)}
-async function temp(r){const d=await read(r,2);return s32(d[0],d[1])/1000}
+const express = require("express");
+const path = require("path");
+const crypto = require("crypto");
+const app = express();
+const PORT = process.env.PORT || 3000;
+const GATEWAY_KEY = process.env.GATEWAY_KEY || "";
+let latest = null;
+app.use(express.json({limit:"32kb"}));
 app.use(express.static(path.join(__dirname,"public")));
-app.get("/api/status",async(req,res)=>{try{const pt=await temp(REG.poolTemp),at=await temp(REG.ambientTemp),p=(await read(REG.pumpOutput,1))[0];res.json({ok:true,poolTemp:pt,ambientTemp:at,pump:{raw:p,on:p!==0},registers:REG,inputScale:1000})}catch(e){res.status(503).json({ok:false,error:e.message,registers:REG,inputScale:1000})}});
-app.listen(PORT,"0.0.0.0",()=>console.log("Greenair Pool Heating v0.2.0 on "+PORT));
+function safeEqual(a,b){const aa=Buffer.from(a||""),bb=Buffer.from(b||"");return aa.length===bb.length && crypto.timingSafeEqual(aa,bb)}
+app.post("/api/gateway/update",(req,res)=>{const key=req.get("x-greenair-key")||"";if(!GATEWAY_KEY||!safeEqual(key,GATEWAY_KEY))return res.status(401).json({ok:false,error:"unauthorized"});const d=req.body||{};if(typeof d.poolTemp!=="number"||typeof d.ambientTemp!=="number"||typeof d.pumpOn!=="boolean")return res.status(400).json({ok:false,error:"invalid payload"});latest={poolTemp:d.poolTemp,ambientTemp:d.ambientTemp,pump:{on:d.pumpOn,raw:d.pumpRaw??null},gateway:d.gateway||"Greenair Windows Gateway",receivedAt:new Date().toISOString(),controller:d.controller||"192.168.1.69:502"};res.json({ok:true,receivedAt:latest.receivedAt})});
+app.get("/api/status",(req,res)=>{if(!latest)return res.status(503).json({ok:false,error:"Waiting for Greenair Gateway"});const age=Date.now()-Date.parse(latest.receivedAt);if(age>30000)return res.status(503).json({ok:false,error:"Gateway stale",last:latest.receivedAt});res.json({ok:true,...latest})});
+app.get("/api/config",(req,res)=>res.json({version:"0.3.0",transport:"Greenair Gateway",writesEnabled:false}));
+app.listen(PORT,"0.0.0.0",()=>console.log("Greenair Pool Heating v0.3.0 on "+PORT));
